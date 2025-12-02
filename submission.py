@@ -8,18 +8,20 @@ import io
 cuda_source = """
 #include <cuda_runtime.h>
 
+#define MAX_SHARED_MEMORY (47 * 1024)
+
 //
 // create your function: __global__ void kernel(...) here
 // Note: input data is of type uint8_t
 //
-__global__ void HistogramKernel(const uint8_t* data_in, int32_t* data_out, int length, int num_channels, int num_bins) {
+__global__ void HistogramKernel(const uint8_t* __restrict__ data_in, int32_t* __restrict__ data_out, int length, int num_channels, int num_bins) {
     // Determine the current block's channel
     int channel = blockIdx.x;
     if (channel >= num_channels) return;
 
     // Establish shraed memory and set to 0 (then sync all threads so nothing is modifying while everything is set)
-    // extern __shared__ int32_t shared_histogram[]; 
-    __shared__ int32_t shared_histogram[256];
+    extern __shared__ int32_t shared_histogram[]; 
+    #pragma unroll
     for (int i = threadIdx.x; i < num_bins; i += blockDim.x)
         shared_histogram[i] = 0;
     __syncthreads();
@@ -54,8 +56,8 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     const uint8_t* data_in = data.data_ptr<uint8_t>();
     int32_t* data_out = histogram.data_ptr<int32_t>();
 
-    // H100 have 1024 threads per block (may lower later)
-    const int threads = 1024;
+    // H100 have 1024 threads per block 
+    const int threads = 256; // fastest when threads = 256 for channel-tiling implementation
     // const int blocks = (length * num_channels + threads - 1) / threads;
     const int blocks = num_channels;
 
@@ -63,8 +65,7 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     size_t shared_mem_size = num_bins * sizeof(int32_t);
 
     // Officially launch da kernel
-    // HistogramKernel<<<blocks, threads, shared_mem_size>>>(data_in, data_out, length, num_channels, num_bins);
-    HistogramKernel<<<blocks, threads>>>(data_in, data_out, length, num_channels, num_bins);
+    HistogramKernel<<<blocks, threads, shared_mem_size>>>(data_in, data_out, length, num_channels, num_bins);
     ////
 
     // Check for errors
@@ -75,7 +76,6 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
 
     return histogram;
 }
-
 """
 
 # C++ header declaration

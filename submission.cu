@@ -1,27 +1,25 @@
 #include <cuda_runtime.h>
 
+#define MAX_SHARED_MEMORY (47 * 1024)
+
 //
 // create your function: __global__ void kernel(...) here
 // Note: input data is of type uint8_t
 //
 __global__ void HistogramKernel(const uint8_t* data_in, int32_t* data_out, int length, int num_channels, int num_bins) {
-    // Determine the current block's channel
     int channel = blockIdx.x;
     if (channel >= num_channels) return;
 
-    // Establish shraed memory and set to 0 (then sync all threads so nothing is modifying while everything is set)
     extern __shared__ int32_t shared_histogram[]; 
     for (int i = threadIdx.x; i < num_bins; i += blockDim.x)
         shared_histogram[i] = 0;
     __syncthreads();
 
-    // Perform atomic add on the local shared memory within the block
     for (int i = threadIdx.x; i < length; i += blockDim.x) {
         uint8_t value = data_in[i * num_channels + channel];
         if (value < num_bins) atomicAdd(&shared_histogram[value], 1);
     }
 
-    // Sync threads in the block and migrate data to output array
     __syncthreads();
     for (int i = threadIdx.x; i < num_bins; i += blockDim.x) 
         atomicAdd(&data_out[channel * num_bins + i], shared_histogram[i]);
@@ -45,9 +43,9 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     const uint8_t* data_in = data.data_ptr<uint8_t>();
     int32_t* data_out = histogram.data_ptr<int32_t>();
 
-    // H100 have 1024 threads per block (may lower later)
-    const int threads = 1024;
-    // const int blocks = (length * num_channels + threads - 1) / threads;
+    // H100 have 1024 threads per block 
+    const int threads = 256; // fastest when threads = 256 for channel-tiling implementation
+    
     const int blocks = num_channels;
 
     // Establish shared memory size per block to perform faster atomic adds within each block
