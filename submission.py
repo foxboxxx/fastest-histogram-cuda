@@ -98,7 +98,7 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     const int channels_per_batch = 64;
 
     // H100 have 1024 threads per block 
-    const int threads = 512; 
+    const int threads = 1024; 
 
     // 144 // 132 // 114 SMs. 
     // const int blocks = 132 * 2;
@@ -108,7 +108,7 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     cudaFuncSetAttribute(HistogramKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);
 
     const int num_batches = (num_channels + channels_per_batch - 1) / channels_per_batch;
-    dim3 blocks(132 * 2, num_batches);
+    dim3 blocks(132, num_batches);
 
     // Officially launch da kernel
     HistogramKernel<<<blocks, threads, shared_mem_size>>>(data_in, data_out, length, num_channels, num_bins, channels_per_batch, num_batches);
