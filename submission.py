@@ -23,7 +23,6 @@ __global__ void HistogramKernel(const uint8_t* __restrict__ data_in, int32_t* __
     int batch = blockIdx.y; 
     if (batch >= num_batches) return; 
 
-    // for (int batch = 0; batch < num_batches; batch++) {
     int channel_offset = batch * channels_per_batch;
 
     // clear memory
@@ -34,22 +33,19 @@ __global__ void HistogramKernel(const uint8_t* __restrict__ data_in, int32_t* __
 
     // calculate thread index, max vectors per row, and total vectors to compute
     int current_thread_idx = blockDim.x * blockIdx.x + threadIdx.x;
-    // int vectors_per_row = channels_per_batch / 16; 
-    int vectors_per_row = channels_per_batch >> 4;
+    int vectors_per_row = channels_per_batch >> 4; // div 16
     int total_vectors = length * vectors_per_row;
 
     // loop through until all vectors are processed 
     for (int i = current_thread_idx; i < total_vectors; i += total_threads) {
-        // int row = i / vectors_per_row;
-        // int vec_idx = i % vectors_per_row;
-        int row = i >> 2;
-        int vec_idx = i & (vectors_per_row - 1);
+        int row = i >> 2; // change to log2(vectors_per_row)
+        int vec_idx = i & (vectors_per_row - 1); // mod vectors_per_row
         int base_local_channel = vec_idx * 16;
         
         int addr_offset = row * num_channels + (base_local_channel);
 
-        uchar4* vec_addr = (uchar4*)(data_in + channel_offset + addr_offset); 
-        uint4 vec_val = *reinterpret_cast<const uint4*>(vec_addr);
+        // ldg for read only optimization
+        uint4 vec_val = __ldg(reinterpret_cast<const uint4*>(data_in + channel_offset + addr_offset));
         uint8_t* vec_converted = reinterpret_cast<uint8_t*>(&vec_val);
         
         #pragma unroll
@@ -65,15 +61,11 @@ __global__ void HistogramKernel(const uint8_t* __restrict__ data_in, int32_t* __
     for (int i = threadIdx.x; i < channels_per_batch * num_bins; i += blockDim.x) {
         int32_t count = shared_mem[i];
         if (count > 0) {
-            // int channel = channel_offset + (i / num_bins);
-            // int bin = (i % num_bins);
             int channel = channel_offset + (i >> 8); // log256
             int bin = (i & 255); // same as mod 256
             atomicAdd(&data_out[channel * num_bins + bin], count);
         }
     }
-
-    // }
 }
 
 // Host function to launch kernel
@@ -94,21 +86,14 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     const uint8_t* data_in = data.data_ptr<uint8_t>();
     int32_t* data_out = histogram.data_ptr<int32_t>();
 
-
     const int channels_per_batch = 64;
+    const int threads = 1024; // H100 have 1024 threads per block 
+    const int num_batches = (num_channels + channels_per_batch - 1) / channels_per_batch;
+    dim3 blocks(132/4, num_batches); // 144 // **132** // 114 SMs. || // const int blocks = 132 * 2;
 
-    // H100 have 1024 threads per block 
-    const int threads = 1024; 
-
-    // 144 // 132 // 114 SMs. 
-    // const int blocks = 132 * 2;
-
-    // 
+    // shared mem alloc
     size_t shared_mem_size = channels_per_batch * (num_bins) * sizeof(int32_t);
     cudaFuncSetAttribute(HistogramKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);
-
-    const int num_batches = (num_channels + channels_per_batch - 1) / channels_per_batch;
-    dim3 blocks(132, num_batches);
 
     // Officially launch da kernel
     HistogramKernel<<<blocks, threads, shared_mem_size>>>(data_in, data_out, length, num_channels, num_bins, channels_per_batch, num_batches);
