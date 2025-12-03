@@ -1,28 +1,43 @@
 #include <cuda_runtime.h>
 
 #define MAX_SHARED_MEMORY (47 * 1024)
+#define MAX_SHARED_MEMORY_OPT_IN (227 * 1024)
 
-//
-// create your function: __global__ void kernel(...) here
-// Note: input data is of type uint8_t
-//
-__global__ void HistogramKernel(const uint8_t* data_in, int32_t* data_out, int length, int num_channels, int num_bins) {
-    int channel = blockIdx.x;
-    if (channel >= num_channels) return;
-
-    extern __shared__ int32_t shared_histogram[]; 
-    for (int i = threadIdx.x; i < num_bins; i += blockDim.x)
-        shared_histogram[i] = 0;
+/*
+ * threadId --> thread #
+ * blockDim --> # of threads per block
+ * blockIdx --> block #
+ */
+__global__ void HistogramKernel(const uint8_t* data_in, int32_t* data_out, int length, int num_channels, int num_bins, int channels_per_block) {
+    extern __shared__ int32_t shared_mem[]; 
+    // zero out the shared histogram
+    for (int i = threadIdx.x; i < channels_per_block * num_bins; i += blockDim.x) {
+        shared_mem[i] = 0;
+    }
     __syncthreads();
 
-    for (int i = threadIdx.x; i < length; i += blockDim.x) {
-        uint8_t value = data_in[i * num_channels + channel];
-        if (value < num_bins) atomicAdd(&shared_histogram[value], 1);
+    // determine global index of thread (# from 0 --> # of values / channels_per_block)
+    int global_idx = blockDim.x * blockIdx.x + threadIdx.x;
+    int starting_channel = (global_idx / length) * channels_per_block;
+    int row = global_idx % length;
+
+    // perform channels_per_block iterations in this thread to promote spatial locality and l1 cache hits
+    for (int local_channel = 0; local_channel < channels_per_block; local_channel++) {
+        int channel = starting_channel + local_channel;
+        uint8_t value = data_in[row * num_channels + channel];
+        atomicAdd(&shared_mem[local_channel * num_bins + value], 1);
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < channels_per_block * num_bins; i += blockDim.x) {
+        int channel = starting_channel + (i / num_bins);
+        int bin = (i % num_bins);
+        int32_t count = shared_mem[i];
+        if (count > 0) {
+            atomicAdd(&data_out[channel * num_bins + bin], count);
+        }
     }
 
-    __syncthreads();
-    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) 
-        atomicAdd(&data_out[channel * num_bins + i], shared_histogram[i]);
 }
 
 // Host function to launch kernel
@@ -43,16 +58,21 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     const uint8_t* data_in = data.data_ptr<uint8_t>();
     int32_t* data_out = histogram.data_ptr<int32_t>();
 
-    // H100 have 1024 threads per block 
-    const int threads = 256; // fastest when threads = 256 for channel-tiling implementation
-    
-    const int blocks = num_channels;
 
-    // Establish shared memory size per block to perform faster atomic adds within each block
-    size_t shared_mem_size = num_bins * sizeof(int32_t);
+    const int channels_per_block = 32;
+
+    // H100 have 1024 threads per block 
+    const int threads = 1024; 
+
+    // 144 // 132 // 114 SMs. 
+    const int blocks = (length * num_channels + (threads * channels_per_block) - 1) / (threads * channels_per_block);
+
+    // 
+    size_t shared_mem_size = channels_per_block * (num_bins) * sizeof(int32_t);
+    // cudaFuncSetAttribute(HistogramKernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);
 
     // Officially launch da kernel
-    HistogramKernel<<<blocks, threads, shared_mem_size>>>(data_in, data_out, length, num_channels, num_bins);
+    HistogramKernel<<<blocks, threads, shared_mem_size>>>(data_in, data_out, length, num_channels, num_bins, channels_per_block);
     ////
 
     // Check for errors
