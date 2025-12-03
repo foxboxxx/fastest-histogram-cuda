@@ -30,7 +30,7 @@ __global__ void HistogramKernel(const uint8_t* __restrict__ data_in, int32_t* __
 
     // loop through until all vectors are processed 
     for (int i = current_thread_idx; i < total_vectors; i += total_threads) {
-        int row = i >> 2; // change to log2(vectors_per_row)
+        int row = i >> 3; // change to log2(vectors_per_row)
         int vec_idx = i & (vectors_per_row - 1); // mod vectors_per_row
         int base_local_channel = vec_idx * 16;
         
@@ -78,7 +78,7 @@ histogram_kernel(torch::Tensor data, // [length, num_channels], dtype=uint8
     const uint8_t* data_in = data.data_ptr<uint8_t>();
     int32_t* data_out = histogram.data_ptr<int32_t>();
 
-    const int channels_per_batch = 64;
+    const int channels_per_batch = 128;
     const int threads = 1024; // H100 have 1024 threads per block 
     const int num_batches = (num_channels + channels_per_batch - 1) / channels_per_batch;
     dim3 blocks(132/4, num_batches); // 144 // **132** // 114 SMs. || // const int blocks = 132 * 2;
